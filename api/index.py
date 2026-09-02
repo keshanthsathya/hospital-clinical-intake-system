@@ -6,13 +6,17 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-app = FastAPI(title="Clinical Intake & Triage System", version="1.0.0")
+app = FastAPI(
+    title="Clinical Intake & Triage System",
+    version="1.0.0",
+    docs_url="/docs",
+    openapi_url="/openapi.json"
+)
 
-# CORS middleware
-ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "*").split(",")
+# CORS middleware - allow all origins so frontends can communicate easily
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=ALLOWED_ORIGINS,
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -20,7 +24,7 @@ app.add_middleware(
 
 MODEL_ID = "gemini-2.5-flash"
 
-# Lazy client initialization to avoid cold-start crashes
+# Lazy client initialization to avoid cold-start crashes if env var is pending
 _client = None
 
 def get_client():
@@ -28,34 +32,42 @@ def get_client():
     if _client is None:
         api_key = os.getenv("GEMINI_API_KEY")
         if not api_key:
-            raise HTTPException(status_code=500, detail="GEMINI_API_KEY environment variable is not set")
-        from google import genai
-        _client = genai.Client(api_key=api_key)
+            raise HTTPException(
+                status_code=500,
+                detail="GEMINI_API_KEY environment variable is not configured in Vercel settings. Please add it to your project environment variables."
+            )
+        try:
+            from google import genai
+            _client = genai.Client(api_key=api_key)
+        except Exception as e:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to initialize Gemini Client: {str(e)}"
+            )
     return _client
 
 
 # ==========================================
-# Health check
+# Health Check & Root Endpoints
 # ==========================================
 
 @app.get("/")
+@app.get("/api")
+@app.get("/api/")
+@app.get("/api/health")
 async def health_check():
     has_key = bool(os.getenv("GEMINI_API_KEY"))
     return {
-        "status": "ok",
-        "service": "Clinical Intake & Triage System",
+        "status": "online",
+        "service": "MediKiosk Clinical Intake & Triage API",
         "version": "1.0.0",
-        "gemini_key_configured": has_key
-    }
-
-@app.get("/api")
-async def api_health():
-    has_key = bool(os.getenv("GEMINI_API_KEY"))
-    return {
-        "status": "ok",
-        "service": "Clinical Intake & Triage System",
-        "version": "1.0.0",
-        "gemini_key_configured": has_key
+        "gemini_api_key_configured": has_key,
+        "endpoints": [
+            "/triage/emergency-check",
+            "/kiosk/chat",
+            "/ayush/chat",
+            "/docs"
+        ]
     }
 
 
@@ -81,8 +93,7 @@ class EmergencyResponse(BaseModel):
     confidence: str
     reason: str
 
-@app.post("/api/triage/emergency-check", response_model=EmergencyResponse)
-async def check_emergency(req: EmergencyRequest):
+async def _process_emergency(req: EmergencyRequest):
     try:
         from google.genai import types
         client = get_client()
@@ -102,6 +113,11 @@ async def check_emergency(req: EmergencyRequest):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/triage/emergency-check", response_model=EmergencyResponse)
+@app.post("/api/triage/emergency-check", response_model=EmergencyResponse)
+async def check_emergency(req: EmergencyRequest):
+    return await _process_emergency(req)
 
 
 # ==========================================
@@ -129,8 +145,7 @@ class ChatSessionRequest(BaseModel):
     chief_complaint: Optional[str] = None
     messages: List[Message] = []
 
-@app.post("/api/kiosk/chat")
-async def medikiosk_chat(req: ChatSessionRequest):
+async def _process_kiosk_chat(req: ChatSessionRequest):
     try:
         from google.genai import types
         client = get_client()
@@ -166,6 +181,11 @@ async def medikiosk_chat(req: ChatSessionRequest):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.post("/kiosk/chat")
+@app.post("/api/kiosk/chat")
+async def medikiosk_chat(req: ChatSessionRequest):
+    return await _process_kiosk_chat(req)
+
 
 # ==========================================
 # 3. AYUSH DASHAVIDHA PARIKSHA ASSISTANT
@@ -190,8 +210,7 @@ Rules:
 - Never diagnose a dosha imbalance - just record what the patient reports for the physician to interpret.
 """
 
-@app.post("/api/ayush/chat")
-async def ayush_chat(req: ChatSessionRequest):
+async def _process_ayush_chat(req: ChatSessionRequest):
     try:
         from google.genai import types
         client = get_client()
@@ -226,3 +245,18 @@ async def ayush_chat(req: ChatSessionRequest):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/ayush/chat")
+@app.post("/api/ayush/chat")
+async def ayush_chat(req: ChatSessionRequest):
+    return await _process_ayush_chat(req)
+
+
+# ==========================================
+# Serverless Handler for Vercel
+# ==========================================
+try:
+    from mangum import Mangum
+    handler = Mangum(app, lifespan="off")
+except Exception:
+    handler = app
