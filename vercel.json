@@ -1,8 +1,11 @@
 {
   "rewrites": [
-    {
-      "source": "/(.*)",
-      "destination": "/api/index.py"
-    }
+    { "source": "/", "destination": "/api/index.py" },
+    { "source": "/docs", "destination": "/api/index.py" },
+    { "source": "/openapi.json", "destination": "/api/index.py" },
+    { "source": "/triage/(.*)", "destination": "/api/index.py" },
+    { "source": "/kiosk/(.*)", "destination": "/api/index.py" },
+    { "source": "/ayush/(.*)", "destination": "/api/index.py" },
+    { "source": "/api/(.*)", "destination": "/api/index.py" }
   ]
 }
