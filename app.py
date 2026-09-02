@@ -1,7 +1,9 @@
 import os
 import json
 from typing import List, Optional
+
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from dotenv import load_dotenv
 from google import genai
@@ -18,9 +20,28 @@ if not GEMINI_API_KEY:
 
 app = FastAPI(title="Clinical Intake & Triage System", version="1.0.0")
 
+# CORS middleware - allow frontend origins to call this API
+ALLOWED_ORIGINS = os.getenv("ALLOWED_ORIGINS", "*").split(",")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=ALLOWED_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 # Initialize GenAI Client
 client = genai.Client()
 MODEL_ID = "gemini-2.5-flash"
+
+
+# ==========================================
+# Health check endpoint
+# ==========================================
+
+@app.get("/")
+async def health_check():
+    return {"status": "ok", "service": "Clinical Intake & Triage System", "version": "1.0.0"}
 
 
 # ==========================================
@@ -127,23 +148,23 @@ async def medikiosk_chat(req: ChatSessionRequest):
 # 3. AYUSH DASHAVIDHA PARIKSHA ASSISTANT
 # ==========================================
 
-AYUSH_SYSTEM_PROMPT = """You are an Ayurvedic clinical history assistant conducting a Dashavidha Pariksha assessment for a patient at an AYUSH OPD. Guide them through a friendly, plain-language conversation (not a form) to gather these ten parameters, one at a time — NEVER use the Sanskrit terms with the patient, translate the intent instead:
+AYUSH_SYSTEM_PROMPT = """You are an Ayurvedic clinical history assistant conducting a Dashavidha Pariksha assessment for a patient at an AYUSH OPD. Guide them through a friendly, plain-language conversation (not a form) to gather these ten parameters, one at a time - NEVER use the Sanskrit terms with the patient, translate the intent instead:
 
-1. Prakriti — typical body build, skin, hair, appetite, temperament since childhood
-2. Vikriti — what feels different from their usual self recently
-3. Sara — general energy and vitality
-4. Samhanana — physical build/frame
-5. Pramana — height/build, kept simple
-6. Satmya — foods, weather, or habits that suit them best
-7. Sattva — how they handle stress or emotional situations
-8. Ahara Shakti — appetite, digestion, food preferences
-9. Vyayama Shakti — how much physical activity they can comfortably do
-10. Vaya — age and general vitality for their age group
+1. Prakriti - typical body build, skin, hair, appetite, temperament since childhood
+2. Vikriti - what feels different from their usual self recently
+3. Sara - general energy and vitality
+4. Samhanana - physical build/frame
+5. Pramana - height/build, kept simple
+6. Satmya - foods, weather, or habits that suit them best
+7. Sattva - how they handle stress or emotional situations
+8. Ahara Shakti - appetite, digestion, food preferences
+9. Vyayama Shakti - how much physical activity they can comfortably do
+10. Vaya - age and general vitality for their age group
 
 Rules:
 - One simple, conversational question at a time; keep the whole flow under 10 questions.
 - At the end, output ONLY JSON with keys: prakriti, vikriti, sara, samhanana, pramana, satmya, sattva, aharaShakti, vyayamaShakti, vaya.
-- Never diagnose a dosha imbalance — just record what the patient reports for the physician to interpret.
+- Never diagnose a dosha imbalance - just record what the patient reports for the physician to interpret.
 """
 
 @app.post("/ayush/chat")
