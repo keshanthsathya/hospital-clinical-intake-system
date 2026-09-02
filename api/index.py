@@ -1,11 +1,13 @@
 import os
 import json
+import traceback
 import urllib.request
 import urllib.error
 from typing import List, Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 app = FastAPI(
@@ -24,10 +26,24 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Global exception handler to give crystal-clear JSON diagnostics
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    return JSONResponse(
+        status_code=500,
+        content={
+            "status": "error",
+            "error": str(exc),
+            "type": type(exc).__name__,
+            "path": request.url.path,
+            "traceback": traceback.format_exc()
+        }
+    )
+
 MODEL_ID = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 
 def call_gemini(system_prompt: str, contents: list, temperature: float = 0.2, response_mime_type: Optional[str] = None) -> str:
-    """Direct HTTP call to Gemini API - zero external dependencies, ultra-fast, zero cold-start crash."""
+    """Direct HTTP call to Gemini API - zero external dependencies, ultra-fast."""
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
         raise HTTPException(
@@ -80,14 +96,10 @@ def call_gemini(system_prompt: str, contents: list, temperature: float = 0.2, re
 
 
 # ==========================================
-# Health Check & Root Endpoints
+# Health Check & Root Endpoints (all path variations)
 # ==========================================
 
-@app.get("/")
-@app.get("/api")
-@app.get("/api/")
-@app.get("/api/health")
-async def health_check():
+async def _health_response():
     has_key = bool(os.getenv("GEMINI_API_KEY"))
     return {
         "status": "online",
@@ -102,6 +114,15 @@ async def health_check():
             "/docs"
         ]
     }
+
+@app.get("/")
+@app.get("/api")
+@app.get("/api/")
+@app.get("/api/index")
+@app.get("/api/index.py")
+@app.get("/api/health")
+async def health_check():
+    return await _health_response()
 
 
 # ==========================================
@@ -143,6 +164,7 @@ async def _process_emergency(req: EmergencyRequest):
 
 @app.post("/triage/emergency-check", response_model=EmergencyResponse)
 @app.post("/api/triage/emergency-check", response_model=EmergencyResponse)
+@app.post("/api/index.py/triage/emergency-check", response_model=EmergencyResponse)
 async def check_emergency(req: EmergencyRequest):
     return await _process_emergency(req)
 
@@ -202,6 +224,7 @@ async def _process_kiosk_chat(req: ChatSessionRequest):
 
 @app.post("/kiosk/chat")
 @app.post("/api/kiosk/chat")
+@app.post("/api/index.py/kiosk/chat")
 async def medikiosk_chat(req: ChatSessionRequest):
     return await _process_kiosk_chat(req)
 
@@ -259,5 +282,6 @@ async def _process_ayush_chat(req: ChatSessionRequest):
 
 @app.post("/ayush/chat")
 @app.post("/api/ayush/chat")
+@app.post("/api/index.py/ayush/chat")
 async def ayush_chat(req: ChatSessionRequest):
     return await _process_ayush_chat(req)
