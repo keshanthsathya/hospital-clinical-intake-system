@@ -1,5 +1,7 @@
 import os
 import json
+import urllib.request
+import urllib.error
 from typing import List, Optional
 
 from fastapi import FastAPI, HTTPException
@@ -22,29 +24,59 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-MODEL_ID = "gemini-2.5-flash"
+MODEL_ID = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 
-# Lazy client initialization to avoid cold-start crashes if env var is pending
-_client = None
-
-def get_client():
-    global _client
-    if _client is None:
-        api_key = os.getenv("GEMINI_API_KEY")
-        if not api_key:
-            raise HTTPException(
-                status_code=500,
-                detail="GEMINI_API_KEY environment variable is not configured in Vercel settings. Please add it to your project environment variables."
-            )
+def call_gemini(system_prompt: str, contents: list, temperature: float = 0.2, response_mime_type: Optional[str] = None) -> str:
+    """Direct HTTP call to Gemini API - zero external dependencies, ultra-fast, zero cold-start crash."""
+    api_key = os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        raise HTTPException(
+            status_code=500,
+            detail="GEMINI_API_KEY is not set in Vercel environment variables. Please add it in Vercel Project Settings -> Environment Variables."
+        )
+    
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL_ID}:generateContent?key={api_key}"
+    
+    payload = {
+        "contents": contents,
+        "generationConfig": {
+            "temperature": temperature
+        }
+    }
+    
+    if system_prompt:
+        payload["system_instruction"] = {
+            "parts": [{"text": system_prompt}]
+        }
+        
+    if response_mime_type:
+        payload["generationConfig"]["responseMimeType"] = response_mime_type
+        
+    data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
+    
+    try:
+        with urllib.request.urlopen(req, timeout=30) as response:
+            result = json.loads(response.read().decode("utf-8"))
+            candidates = result.get("candidates", [])
+            if not candidates:
+                raise HTTPException(status_code=500, detail="Gemini returned no response candidates.")
+            parts = candidates[0].get("content", {}).get("parts", [])
+            if not parts:
+                raise HTTPException(status_code=500, detail="Gemini response content is empty.")
+            return parts[0].get("text", "")
+    except urllib.error.HTTPError as e:
+        error_body = e.read().decode("utf-8", errors="ignore")
         try:
-            from google import genai
-            _client = genai.Client(api_key=api_key)
-        except Exception as e:
-            raise HTTPException(
-                status_code=500,
-                detail=f"Failed to initialize Gemini Client: {str(e)}"
-            )
-    return _client
+            err_json = json.loads(error_body)
+            err_msg = err_json.get("error", {}).get("message", error_body)
+        except Exception:
+            err_msg = error_body
+        raise HTTPException(status_code=e.code, detail=f"Gemini API error ({e.code}): {err_msg}")
+    except urllib.error.URLError as e:
+        raise HTTPException(status_code=500, detail=f"Network error calling Gemini: {str(e.reason)}")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Unexpected error: {str(e)}")
 
 
 # ==========================================
@@ -62,6 +94,7 @@ async def health_check():
         "service": "MediKiosk Clinical Intake & Triage API",
         "version": "1.0.0",
         "gemini_api_key_configured": has_key,
+        "model": MODEL_ID,
         "endpoints": [
             "/triage/emergency-check",
             "/kiosk/chat",
@@ -94,25 +127,19 @@ class EmergencyResponse(BaseModel):
     reason: str
 
 async def _process_emergency(req: EmergencyRequest):
+    contents = [
+        {"role": "user", "parts": [{"text": f"Patient text: {req.patient_text}"}]}
+    ]
+    raw_text = call_gemini(
+        system_prompt=EMERGENCY_SYSTEM_PROMPT,
+        contents=contents,
+        temperature=0.0,
+        response_mime_type="application/json"
+    )
     try:
-        from google.genai import types
-        client = get_client()
-        response = client.models.generate_content(
-            model=MODEL_ID,
-            contents=[
-                {"role": "user", "parts": [{"text": f"Patient text: {req.patient_text}"}]}
-            ],
-            config=types.GenerateContentConfig(
-                system_instruction=EMERGENCY_SYSTEM_PROMPT,
-                response_mime_type="application/json",
-                temperature=0.0
-            ),
-        )
-        return json.loads(response.text)
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        return json.loads(raw_text)
+    except Exception:
+        return {"emergency": False, "confidence": "low", "reason": raw_text}
 
 @app.post("/triage/emergency-check", response_model=EmergencyResponse)
 @app.post("/api/triage/emergency-check", response_model=EmergencyResponse)
@@ -146,40 +173,32 @@ class ChatSessionRequest(BaseModel):
     messages: List[Message] = []
 
 async def _process_kiosk_chat(req: ChatSessionRequest):
-    try:
-        from google.genai import types
-        client = get_client()
-        contents = []
-        if req.chief_complaint and not req.messages:
+    contents = []
+    if req.chief_complaint and not req.messages:
+        contents.append({
+            "role": "user", 
+            "parts": [{"text": f"The patient's chief complaint is: {req.chief_complaint}"}]
+        })
+    else:
+        for m in req.messages:
             contents.append({
-                "role": "user", 
-                "parts": [{"text": f"The patient's chief complaint is: {req.chief_complaint}"}]
+                "role": "user" if m.role == "user" else "model",
+                "parts": [{"text": m.text}]
             })
-        else:
-            for m in req.messages:
-                contents.append({
-                    "role": "user" if m.role == "user" else "model",
-                    "parts": [{"text": m.text}]
-                })
 
-        response = client.models.generate_content(
-            model=MODEL_ID,
-            contents=contents,
-            config=types.GenerateContentConfig(
-                system_instruction=MEDIKIOSK_SYSTEM_PROMPT,
-                temperature=0.2
-            ),
-        )
+    response_text = call_gemini(
+        system_prompt=MEDIKIOSK_SYSTEM_PROMPT,
+        contents=contents,
+        temperature=0.2
+    ).strip()
 
-        response_text = response.text.strip()
-        if response_text.startswith("{") and response_text.endswith("}"):
+    if response_text.startswith("{") and response_text.endswith("}"):
+        try:
             return {"type": "completed", "data": json.loads(response_text)}
-        
-        return {"type": "question", "reply": response_text}
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        except Exception:
+            pass
+    
+    return {"type": "question", "reply": response_text}
 
 @app.post("/kiosk/chat")
 @app.post("/api/kiosk/chat")
@@ -211,52 +230,34 @@ Rules:
 """
 
 async def _process_ayush_chat(req: ChatSessionRequest):
-    try:
-        from google.genai import types
-        client = get_client()
-        contents = []
-        if not req.messages:
+    contents = []
+    if not req.messages:
+        contents.append({
+            "role": "user", 
+            "parts": [{"text": "Start the assessment with the first friendly question."}]
+        })
+    else:
+        for m in req.messages:
             contents.append({
-                "role": "user", 
-                "parts": [{"text": "Start the assessment with the first friendly question."}]
+                "role": "user" if m.role == "user" else "model",
+                "parts": [{"text": m.text}]
             })
-        else:
-            for m in req.messages:
-                contents.append({
-                    "role": "user" if m.role == "user" else "model",
-                    "parts": [{"text": m.text}]
-                })
 
-        response = client.models.generate_content(
-            model=MODEL_ID,
-            contents=contents,
-            config=types.GenerateContentConfig(
-                system_instruction=AYUSH_SYSTEM_PROMPT,
-                temperature=0.3
-            ),
-        )
+    response_text = call_gemini(
+        system_prompt=AYUSH_SYSTEM_PROMPT,
+        contents=contents,
+        temperature=0.3
+    ).strip()
 
-        response_text = response.text.strip()
-        if response_text.startswith("{") and response_text.endswith("}"):
+    if response_text.startswith("{") and response_text.endswith("}"):
+        try:
             return {"type": "completed", "data": json.loads(response_text)}
+        except Exception:
+            pass
 
-        return {"type": "question", "reply": response_text}
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    return {"type": "question", "reply": response_text}
 
 @app.post("/ayush/chat")
 @app.post("/api/ayush/chat")
 async def ayush_chat(req: ChatSessionRequest):
     return await _process_ayush_chat(req)
-
-
-# ==========================================
-# Serverless Handler for Vercel
-# ==========================================
-try:
-    from mangum import Mangum
-    handler = Mangum(app, lifespan="off")
-except Exception:
-    handler = app
