@@ -1,14 +1,24 @@
 import os
 import json
-from typing import List, Optional, Dict, Any
+from typing import List, Optional
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
+from dotenv import load_dotenv
 from google import genai
 from google.genai import types
 
+# Load local environment variables from a .env file (for local development)
+load_dotenv()
+
+# Verify that an API key is available
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+if not GEMINI_API_KEY:
+    # Client will attempt to read GEMINI_API_KEY from environment automatically
+    pass
+
 app = FastAPI(title="Clinical Intake & Triage System", version="1.0.0")
 
-# Initialize Gemini Client (reads GEMINI_API_KEY from environment)
+# Initialize GenAI Client
 client = genai.Client()
 MODEL_ID = "gemini-2.5-flash"
 
@@ -65,14 +75,14 @@ Rules:
 - Never repeat ground the patient has already covered.
 - After 6-8 exchanges (fewer for minor complaints), stop and output ONLY JSON with keys: 
   chiefComplaint, onset, duration, character, location, radiation, aggravatingFactors, relievingFactors, severity, associatedSymptoms.
-- If the patient mentions an emergency pattern (e.g. chest pain + breathlessness + sweating, sudden one-sided weakness, severe bleeding, loss of consciousness), stop immediately and output:
+- If the patient mentions an emergency pattern, stop immediately and output:
   {"emergency": true, "reason": "<short reason>"}
 - Never diagnose. Never suggest medication. You are only collecting history.
 - Match the patient's language if they respond in Hindi/Tamil/Telugu/Kannada/Bengali.
 """
 
 class Message(BaseModel):
-    role: str # "user" or "model"
+    role: str  # "user" or "model"
     text: str
 
 class ChatSessionRequest(BaseModel):
@@ -105,8 +115,6 @@ async def medikiosk_chat(req: ChatSessionRequest):
         )
 
         response_text = response.text.strip()
-        
-        # Check if response is structured JSON (final summary or emergency flag)
         if response_text.startswith("{") and response_text.endswith("}"):
             return {"type": "completed", "data": json.loads(response_text)}
         
@@ -134,7 +142,7 @@ AYUSH_SYSTEM_PROMPT = """You are an Ayurvedic clinical history assistant conduct
 
 Rules:
 - One simple, conversational question at a time; keep the whole flow under 10 questions.
-- At the end, output ONLY JSON with keys: prakriti, vikriti, sara, samhanana, pramana, satmya, sattva, aharaShakti, vyayamaShakti, vaya — each a short clinical-style phrase in English, even if the patient answered in a regional language.
+- At the end, output ONLY JSON with keys: prakriti, vikriti, sara, samhanana, pramana, satmya, sattva, aharaShakti, vyayamaShakti, vaya.
 - Never diagnose a dosha imbalance — just record what the patient reports for the physician to interpret.
 """
 
@@ -164,15 +172,9 @@ async def ayush_chat(req: ChatSessionRequest):
         )
 
         response_text = response.text.strip()
-
         if response_text.startswith("{") and response_text.endswith("}"):
             return {"type": "completed", "data": json.loads(response_text)}
 
         return {"type": "question", "reply": response_text}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
