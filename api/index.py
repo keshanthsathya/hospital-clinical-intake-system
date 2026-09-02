@@ -5,13 +5,6 @@ from typing import List, Optional
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from google import genai
-from google.genai import types
-
-# Verify that an API key is available
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-if not GEMINI_API_KEY:
-    pass
 
 app = FastAPI(title="Clinical Intake & Triage System", version="1.0.0")
 
@@ -25,9 +18,20 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Initialize GenAI Client
-client = genai.Client()
 MODEL_ID = "gemini-2.5-flash"
+
+# Lazy client initialization to avoid cold-start crashes
+_client = None
+
+def get_client():
+    global _client
+    if _client is None:
+        api_key = os.getenv("GEMINI_API_KEY")
+        if not api_key:
+            raise HTTPException(status_code=500, detail="GEMINI_API_KEY environment variable is not set")
+        from google import genai
+        _client = genai.Client(api_key=api_key)
+    return _client
 
 
 # ==========================================
@@ -36,12 +40,23 @@ MODEL_ID = "gemini-2.5-flash"
 
 @app.get("/")
 async def health_check():
-    return {"status": "ok", "service": "Clinical Intake & Triage System", "version": "1.0.0"}
-
+    has_key = bool(os.getenv("GEMINI_API_KEY"))
+    return {
+        "status": "ok",
+        "service": "Clinical Intake & Triage System",
+        "version": "1.0.0",
+        "gemini_key_configured": has_key
+    }
 
 @app.get("/api")
 async def api_health():
-    return {"status": "ok", "service": "Clinical Intake & Triage System", "version": "1.0.0"}
+    has_key = bool(os.getenv("GEMINI_API_KEY"))
+    return {
+        "status": "ok",
+        "service": "Clinical Intake & Triage System",
+        "version": "1.0.0",
+        "gemini_key_configured": has_key
+    }
 
 
 # ==========================================
@@ -69,6 +84,8 @@ class EmergencyResponse(BaseModel):
 @app.post("/api/triage/emergency-check", response_model=EmergencyResponse)
 async def check_emergency(req: EmergencyRequest):
     try:
+        from google.genai import types
+        client = get_client()
         response = client.models.generate_content(
             model=MODEL_ID,
             contents=[
@@ -81,6 +98,8 @@ async def check_emergency(req: EmergencyRequest):
             ),
         )
         return json.loads(response.text)
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -113,6 +132,8 @@ class ChatSessionRequest(BaseModel):
 @app.post("/api/kiosk/chat")
 async def medikiosk_chat(req: ChatSessionRequest):
     try:
+        from google.genai import types
+        client = get_client()
         contents = []
         if req.chief_complaint and not req.messages:
             contents.append({
@@ -140,6 +161,8 @@ async def medikiosk_chat(req: ChatSessionRequest):
             return {"type": "completed", "data": json.loads(response_text)}
         
         return {"type": "question", "reply": response_text}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -170,6 +193,8 @@ Rules:
 @app.post("/api/ayush/chat")
 async def ayush_chat(req: ChatSessionRequest):
     try:
+        from google.genai import types
+        client = get_client()
         contents = []
         if not req.messages:
             contents.append({
@@ -197,5 +222,7 @@ async def ayush_chat(req: ChatSessionRequest):
             return {"type": "completed", "data": json.loads(response_text)}
 
         return {"type": "question", "reply": response_text}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
